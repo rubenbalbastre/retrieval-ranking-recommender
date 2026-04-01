@@ -22,24 +22,33 @@ def main() -> None:
     corpus = (df["title"].fillna("") + " " + df["genres"].fillna("") + " " + df["tags_text"]).tolist()
 
     tfidf = TfidfVectorizer(max_features=settings.embedding_dim)
-    vectors = tfidf.fit_transform(corpus).toarray().astype(np.float32)
-
-    if vectors.shape[1] < settings.embedding_dim:
-        pad = np.zeros((vectors.shape[0], settings.embedding_dim - vectors.shape[1]), dtype=np.float32)
-        vectors = np.hstack([vectors, pad])
-
+    vectors = tfidf.fit_transform(corpus)
     vectors = normalize(vectors, norm="l2")
+
+    current_dim = vectors.shape[1]
+    target_dim = settings.embedding_dim
+    pad_width = max(0, target_dim - current_dim)
 
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("TRUNCATE TABLE movie_embeddings")
-            cur.executemany(
-                "INSERT INTO movie_embeddings (movie_id, embedding) VALUES (%s, %s)",
-                [
-                    (int(movie_id), list(map(float, emb.tolist())))
-                    for movie_id, emb in zip(df["movie_id"].values, vectors, strict=True)
-                ],
-            )
+            batch: list[tuple[int, list[float]]] = []
+            for idx, movie_id in enumerate(df["movie_id"].values):
+                emb = vectors.getrow(idx).toarray().ravel().astype(np.float32)
+                if pad_width > 0:
+                    emb = np.pad(emb, (0, pad_width), mode="constant")
+                batch.append((int(movie_id), list(map(float, emb.tolist()))))
+                if len(batch) >= 500:
+                    cur.executemany(
+                        "INSERT INTO movie_embeddings (movie_id, embedding) VALUES (%s, %s)",
+                        batch,
+                    )
+                    batch.clear()
+            if batch:
+                cur.executemany(
+                    "INSERT INTO movie_embeddings (movie_id, embedding) VALUES (%s, %s)",
+                    batch,
+                )
         conn.commit()
 
     print(f"Stored {len(df)} movie embeddings.")

@@ -28,23 +28,37 @@ def main() -> None:
 
     movies["release_year"] = movies["title"].map(parse_release_year)
 
+    movie_rows = [
+        (
+            int(row.movieId),
+            str(row.title),
+            str(row.genres),
+            None if pd.isna(row.release_year) else int(row.release_year),
+        )
+        for row in movies[["movieId", "title", "genres", "release_year"]].itertuples(index=False)
+    ]
+    rating_rows = [
+        (int(row.userId), int(row.movieId), float(row.rating), int(row.timestamp))
+        for row in ratings[["userId", "movieId", "rating", "timestamp"]].itertuples(index=False)
+    ]
+    tag_rows = [
+        (int(row.userId), int(row.movieId), str(row.tag), int(row.timestamp))
+        for row in tags[["userId", "movieId", "tag", "timestamp"]].itertuples(index=False)
+    ]
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("TRUNCATE TABLE ratings, tags, movies RESTART IDENTITY CASCADE;")
-
-            movie_rows = list(movies[["movieId", "title", "genres", "release_year"]].itertuples(index=False, name=None))
             cur.executemany(
                 "INSERT INTO movies (movie_id, title, genres, release_year) VALUES (%s, %s, %s, %s)",
                 movie_rows,
             )
 
-            rating_rows = list(ratings[["userId", "movieId", "rating", "timestamp"]].itertuples(index=False, name=None))
             cur.executemany(
                 "INSERT INTO ratings (user_id, movie_id, rating, ts) VALUES (%s, %s, %s, %s)",
                 rating_rows,
             )
 
-            tag_rows = list(tags[["userId", "movieId", "tag", "timestamp"]].itertuples(index=False, name=None))
             cur.executemany(
                 "INSERT INTO tags (user_id, movie_id, tag, ts) VALUES (%s, %s, %s, %s)",
                 tag_rows,
