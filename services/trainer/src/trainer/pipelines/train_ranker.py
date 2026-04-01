@@ -12,7 +12,14 @@ from trainer.db import get_connection
 
 
 def unpack_features(df: pd.DataFrame) -> pd.DataFrame:
-    feat = pd.json_normalize(df["features"].map(json.loads))
+    def _parse(v: object) -> dict:
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            return json.loads(v)
+        return {}
+
+    feat = pd.json_normalize(df["features"].map(_parse))
     feat.index = df.index
     return pd.concat([df.drop(columns=["features"]), feat], axis=1)
 
@@ -23,14 +30,29 @@ def group_sizes(df: pd.DataFrame) -> list[int]:
 
 def main() -> None:
     with get_connection() as conn:
-        ds = pd.read_sql("SELECT user_id, movie_id, label, split, features FROM ranking_dataset", conn)
+        ds = pd.DataFrame(
+            conn.execute("SELECT user_id, movie_id, label, split, features FROM ranking_dataset").fetchall()
+        )
 
     ds = unpack_features(ds)
+    ds["user_id"] = pd.to_numeric(ds["user_id"], errors="coerce")
+    ds["movie_id"] = pd.to_numeric(ds["movie_id"], errors="coerce")
+    ds["label"] = pd.to_numeric(ds["label"], errors="coerce")
+    ds["split"] = ds["split"].astype(str)
+    ds = ds.dropna(subset=["user_id", "movie_id", "label"]).copy()
 
     train = ds[ds["split"] == "train"].sort_values(["user_id", "movie_id"])
     val = ds[ds["split"] == "val"].sort_values(["user_id", "movie_id"])
 
+    if train.empty:
+        raise RuntimeError("No training rows found in ranking_dataset (split='train').")
+    if val.empty:
+        raise RuntimeError("No validation rows found in ranking_dataset (split='val').")
+
     feature_cols = [c for c in train.columns if c not in {"user_id", "movie_id", "label", "split"}]
+    for col in feature_cols:
+        train[col] = pd.to_numeric(train[col], errors="coerce").fillna(0.0)
+        val[col] = pd.to_numeric(val[col], errors="coerce").fillna(0.0)
 
     dtrain = xgb.DMatrix(train[feature_cols].values, label=train["label"].values)
     dval = xgb.DMatrix(val[feature_cols].values, label=val["label"].values)

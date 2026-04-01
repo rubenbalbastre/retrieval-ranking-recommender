@@ -11,10 +11,13 @@ from trainer.db import get_connection
 
 def main() -> None:
     with get_connection() as conn:
-        movies = pd.read_sql("SELECT movie_id, title, genres FROM movies", conn)
-        tags = pd.read_sql(
-            "SELECT movie_id, string_agg(tag, ' ') AS tags_text FROM tags GROUP BY movie_id",
-            conn,
+        movies = pd.DataFrame(
+            conn.execute("SELECT movie_id, title, genres FROM movies").fetchall()
+        )
+        tags = pd.DataFrame(
+            conn.execute(
+                "SELECT movie_id, string_agg(tag, ' ') AS tags_text FROM tags GROUP BY movie_id"
+            ).fetchall()
         )
 
     df = movies.merge(tags, on="movie_id", how="left")

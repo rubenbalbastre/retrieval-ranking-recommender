@@ -7,8 +7,17 @@ from trainer.config import settings
 from trainer.db import get_connection
 
 
+def parse_embedding(value: object) -> np.ndarray:
+    if isinstance(value, str):
+        cleaned = value.strip().strip("[]")
+        if not cleaned:
+            return np.array([], dtype=np.float32)
+        return np.fromstring(cleaned, sep=",", dtype=np.float32)
+    return np.array(value, dtype=np.float32)
+
+
 def build_content_candidates(ratings: pd.DataFrame, embeddings: pd.DataFrame) -> pd.DataFrame:
-    emb_map = {row.movie_id: np.array(row.embedding, dtype=np.float32) for row in embeddings.itertuples(index=False)}
+    emb_map = {int(row.movie_id): parse_embedding(row.embedding) for row in embeddings.itertuples(index=False)}
     all_movie_ids = list(emb_map.keys())
     all_matrix = np.vstack([emb_map[mid] for mid in all_movie_ids])
 
@@ -90,15 +99,15 @@ def build_collaborative_candidates(ratings: pd.DataFrame) -> pd.DataFrame:
 
 def main() -> None:
     with get_connection() as conn:
-        ratings = pd.read_sql("SELECT user_id, movie_id, rating FROM ratings", conn)
-        embeddings = pd.read_sql("SELECT movie_id, embedding FROM movie_embeddings", conn)
+        ratings = pd.DataFrame(conn.execute("SELECT user_id, movie_id, rating FROM ratings").fetchall())
+        embeddings = pd.DataFrame(conn.execute("SELECT movie_id, embedding FROM movie_embeddings").fetchall())
 
     content_df = build_content_candidates(ratings, embeddings)
     collab_df = build_collaborative_candidates(ratings)
 
     merged = content_df.merge(collab_df, on=["user_id", "movie_id"], how="outer")
-    merged["retrieved_by_content"] = merged["retrieved_by_content"].fillna(False)
-    merged["retrieved_by_collaborative"] = merged["retrieved_by_collaborative"].fillna(False)
+    merged["retrieved_by_content"] = merged["retrieved_by_content"].eq(True)
+    merged["retrieved_by_collaborative"] = merged["retrieved_by_collaborative"].eq(True)
     merged["number_of_sources"] = (
         merged["retrieved_by_content"].astype(int) + merged["retrieved_by_collaborative"].astype(int)
     )

@@ -25,13 +25,12 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      - mlflow_data:/mlflow
       - ./artifacts:/app/artifacts
     command: >
       mlflow server
       --host 0.0.0.0
       --port 5000
-      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --backend-store-uri sqlite:////app/artifacts/mlflow/mlflow.db
       --default-artifact-root /app/artifacts/mlflow
 
   trainer:
@@ -46,7 +45,7 @@ services:
       - .env
     environment:
       DB_HOST: db
-      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_URI: sqlite:////app/artifacts/mlflow/mlflow.db
       DATA_DIR: data/raw
       PROCESSED_DIR: data/processed
       MODELS_DIR: artifacts/models
@@ -74,4 +73,3 @@ services:
 
 volumes:
   postgres_data:
-  mlflow_data:

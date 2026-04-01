@@ -11,7 +11,14 @@ from trainer.db import get_connection
 
 
 def unpack_features(df: pd.DataFrame) -> pd.DataFrame:
-    feat = pd.json_normalize(df["features"].map(json.loads))
+    def _parse(v: object) -> dict:
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            return json.loads(v)
+        return {}
+
+    feat = pd.json_normalize(df["features"].map(_parse))
     feat.index = df.index
     return pd.concat([df.drop(columns=["features"]), feat], axis=1)
 
@@ -29,14 +36,23 @@ def main() -> None:
     booster.load_model(str(model_path))
 
     with get_connection() as conn:
-        ds = pd.read_sql("SELECT user_id, movie_id, split, features FROM ranking_dataset", conn)
+        ds = pd.DataFrame(
+            conn.execute("SELECT user_id, movie_id, split, features FROM ranking_dataset").fetchall()
+        )
 
     ds = unpack_features(ds)
+    ds["user_id"] = pd.to_numeric(ds["user_id"], errors="coerce")
+    ds["movie_id"] = pd.to_numeric(ds["movie_id"], errors="coerce")
+    ds["split"] = ds["split"].astype(str)
+    ds = ds.dropna(subset=["user_id", "movie_id"]).copy()
     infer_df = ds[ds["split"] != "train"].copy()
+    if infer_df.empty:
+        raise RuntimeError("No non-train rows found to generate recommendations.")
 
     for col in feature_cols:
         if col not in infer_df.columns:
             infer_df[col] = 0.0
+        infer_df[col] = pd.to_numeric(infer_df[col], errors="coerce").fillna(0.0)
 
     infer_df["score"] = booster.predict(xgb.DMatrix(infer_df[feature_cols].values))
     infer_df = infer_df.sort_values(["user_id", "score"], ascending=[True, False])

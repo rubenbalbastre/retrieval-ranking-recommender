@@ -10,10 +10,10 @@ logs:
 	docker compose logs -f --tail=200
 
 data:
-	docker compose run --rm trainer python -m trainer.pipelines.download_movielens
+	docker compose run --rm --use-aliases trainer python -m trainer.pipelines.download_movielens
 
 train:
-	docker compose run --rm trainer python -m trainer.pipelines.run_pipeline
+	docker compose up --build --abort-on-container-exit --exit-code-from trainer trainer
 
 api:
 	docker compose up -d api

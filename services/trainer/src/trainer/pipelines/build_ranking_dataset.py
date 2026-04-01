@@ -17,9 +17,23 @@ def build_time_split(ratings: pd.DataFrame) -> pd.DataFrame:
 
 def main() -> None:
     with get_connection() as conn:
-        ratings = pd.read_sql("SELECT user_id, movie_id, rating, ts FROM ratings", conn)
-        candidates = pd.read_sql("SELECT * FROM user_candidates", conn)
-        movies = pd.read_sql("SELECT movie_id, genres, release_year FROM movies", conn)
+        ratings = pd.DataFrame(conn.execute("SELECT user_id, movie_id, rating, ts FROM ratings").fetchall())
+        candidates = pd.DataFrame(conn.execute("SELECT * FROM user_candidates").fetchall())
+        movies = pd.DataFrame(conn.execute("SELECT movie_id, genres, release_year FROM movies").fetchall())
+
+    ratings["user_id"] = pd.to_numeric(ratings["user_id"], errors="coerce")
+    ratings["movie_id"] = pd.to_numeric(ratings["movie_id"], errors="coerce")
+    ratings["rating"] = pd.to_numeric(ratings["rating"], errors="coerce")
+    ratings["ts"] = pd.to_numeric(ratings["ts"], errors="coerce")
+    ratings = ratings.dropna(subset=["user_id", "movie_id", "rating", "ts"]).copy()
+
+    candidates["user_id"] = pd.to_numeric(candidates["user_id"], errors="coerce")
+    candidates["movie_id"] = pd.to_numeric(candidates["movie_id"], errors="coerce")
+    candidates = candidates.dropna(subset=["user_id", "movie_id"]).copy()
+
+    movies["movie_id"] = pd.to_numeric(movies["movie_id"], errors="coerce")
+    movies["release_year"] = pd.to_numeric(movies["release_year"], errors="coerce")
+    movies = movies.dropna(subset=["movie_id"]).copy()
 
     ratings = build_time_split(ratings)
 
