@@ -1,13 +1,21 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
-CREATE TABLE IF NOT EXISTS movies (
+DROP TABLE IF EXISTS recommendations;
+DROP TABLE IF EXISTS ranking_dataset;
+DROP TABLE IF EXISTS user_candidates;
+DROP TABLE IF EXISTS movie_embeddings;
+DROP TABLE IF EXISTS tags;
+DROP TABLE IF EXISTS ratings;
+DROP TABLE IF EXISTS movies;
+
+CREATE TABLE movies (
     movie_id BIGINT PRIMARY KEY,
     title TEXT NOT NULL,
     genres TEXT NOT NULL,
     release_year INT
 );
 
-CREATE TABLE IF NOT EXISTS ratings (
+CREATE TABLE ratings (
     user_id BIGINT NOT NULL,
     movie_id BIGINT NOT NULL,
     rating DOUBLE PRECISION NOT NULL,
@@ -15,19 +23,19 @@ CREATE TABLE IF NOT EXISTS ratings (
     PRIMARY KEY (user_id, movie_id)
 );
 
-CREATE TABLE IF NOT EXISTS tags (
+CREATE TABLE tags (
     user_id BIGINT NOT NULL,
     movie_id BIGINT NOT NULL,
     tag TEXT NOT NULL,
     ts BIGINT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS movie_embeddings (
+CREATE TABLE movie_embeddings (
     movie_id BIGINT PRIMARY KEY REFERENCES movies(movie_id),
     embedding vector(256)
 );
 
-CREATE TABLE IF NOT EXISTS user_candidates (
+CREATE TABLE user_candidates (
     user_id BIGINT NOT NULL,
     movie_id BIGINT NOT NULL,
     retrieved_by_content BOOLEAN NOT NULL DEFAULT FALSE,
@@ -40,7 +48,7 @@ CREATE TABLE IF NOT EXISTS user_candidates (
     PRIMARY KEY (user_id, movie_id)
 );
 
-CREATE TABLE IF NOT EXISTS ranking_dataset (
+CREATE TABLE ranking_dataset (
     user_id BIGINT NOT NULL,
     movie_id BIGINT NOT NULL,
     label INT NOT NULL,
@@ -49,7 +57,7 @@ CREATE TABLE IF NOT EXISTS ranking_dataset (
     PRIMARY KEY (user_id, movie_id)
 );
 
-CREATE TABLE IF NOT EXISTS recommendations (
+CREATE TABLE recommendations (
     user_id BIGINT NOT NULL,
     movie_id BIGINT NOT NULL,
     score DOUBLE PRECISION NOT NULL,
