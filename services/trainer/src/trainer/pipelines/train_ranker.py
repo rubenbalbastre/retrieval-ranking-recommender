@@ -1,0 +1,94 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import mlflow
+import pandas as pd
+import xgboost as xgb
+
+from trainer.config import settings
+from trainer.db import get_connection
+
+
+def unpack_features(df: pd.DataFrame) -> pd.DataFrame:
+    feat = pd.json_normalize(df["features"].map(json.loads))
+    feat.index = df.index
+    return pd.concat([df.drop(columns=["features"]), feat], axis=1)
+
+
+def group_sizes(df: pd.DataFrame) -> list[int]:
+    return df.groupby("user_id").size().tolist()
+
+
+def main() -> None:
+    with get_connection() as conn:
+        ds = pd.read_sql("SELECT user_id, movie_id, label, split, features FROM ranking_dataset", conn)
+
+    ds = unpack_features(ds)
+
+    train = ds[ds["split"] == "train"].sort_values(["user_id", "movie_id"])
+    val = ds[ds["split"] == "val"].sort_values(["user_id", "movie_id"])
+
+    feature_cols = [c for c in train.columns if c not in {"user_id", "movie_id", "label", "split"}]
+
+    dtrain = xgb.DMatrix(train[feature_cols].values, label=train["label"].values)
+    dval = xgb.DMatrix(val[feature_cols].values, label=val["label"].values)
+    dtrain.set_group(group_sizes(train))
+    dval.set_group(group_sizes(val))
+
+    params = {
+        "objective": "rank:ndcg",
+        "eval_metric": "ndcg@10",
+        "learning_rate": 0.05,
+        "max_depth": 6,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "seed": 42,
+    }
+
+    evals_result: dict[str, dict[str, list[float]]] = {}
+    mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
+    mlflow.set_experiment(settings.mlflow_experiment)
+
+    with mlflow.start_run():
+        mlflow.log_params(
+            {
+                **params,
+                "num_boost_round": 300,
+                "early_stopping_rounds": 30,
+                "n_train_rows": int(len(train)),
+                "n_val_rows": int(len(val)),
+                "n_features": int(len(feature_cols)),
+            }
+        )
+
+        booster = xgb.train(
+            params,
+            dtrain,
+            num_boost_round=300,
+            evals=[(dtrain, "train"), (dval, "val")],
+            early_stopping_rounds=30,
+            verbose_eval=25,
+            evals_result=evals_result,
+        )
+
+        settings.models_dir.mkdir(parents=True, exist_ok=True)
+        model_path = Path(settings.models_dir) / "xgb_ranker.json"
+        meta_path = Path(settings.models_dir) / "ranker_features.json"
+
+        booster.save_model(str(model_path))
+        meta_path.write_text(json.dumps({"feature_cols": feature_cols}, indent=2), encoding="utf-8")
+
+        best_iteration = int(booster.best_iteration)
+        best_val_ndcg = float(evals_result["val"]["ndcg@10"][best_iteration])
+        mlflow.log_metric("best_val_ndcg_at_10", best_val_ndcg)
+        mlflow.log_metric("best_iteration", best_iteration)
+        mlflow.log_artifact(str(model_path))
+        mlflow.log_artifact(str(meta_path))
+
+    print(f"Saved model to {model_path} | best_val_ndcg@10={best_val_ndcg:.6f}")
+
+
+if __name__ == "__main__":
+    main()

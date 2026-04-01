@@ -1,0 +1,77 @@
+services:
+  db:
+    build:
+      context: .
+      dockerfile: infra/db/Dockerfile
+    container_name: openrecommender-db
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: infra/mlflow/Dockerfile
+    container_name: openrecommender-mlflow
+    env_file:
+      - .env
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+      - ./artifacts:/app/artifacts
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /app/artifacts/mlflow
+
+  trainer:
+    build:
+      context: .
+      dockerfile: services/trainer/Dockerfile
+    container_name: openrecommender-trainer
+    depends_on:
+      - db
+      - mlflow
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      DATA_DIR: data/raw
+      PROCESSED_DIR: data/processed
+      MODELS_DIR: artifacts/models
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: python -m trainer.pipelines.run_pipeline
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    container_name: openrecommender-api
+    depends_on:
+      - db
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/app
+    working_dir: /app
+
+volumes:
+  postgres_data:
+  mlflow_data:
