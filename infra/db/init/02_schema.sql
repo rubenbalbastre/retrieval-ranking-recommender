@@ -3,6 +3,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 DROP TABLE IF EXISTS recommendations;
 DROP TABLE IF EXISTS ranking_dataset;
 DROP TABLE IF EXISTS user_candidates;
+DROP TABLE IF EXISTS item_similarities;
 DROP TABLE IF EXISTS movie_embeddings;
 DROP TABLE IF EXISTS tags;
 DROP TABLE IF EXISTS ratings;
@@ -50,6 +51,13 @@ CREATE TABLE user_candidates (
     PRIMARY KEY (user_id, movie_id)
 );
 
+CREATE TABLE item_similarities (
+    item_id BIGINT NOT NULL,
+    similar_item_id BIGINT NOT NULL,
+    similarity DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (item_id, similar_item_id)
+);
+
 CREATE TABLE ranking_dataset (
     user_id BIGINT NOT NULL,
     movie_id BIGINT NOT NULL,
@@ -71,4 +79,6 @@ CREATE TABLE recommendations (
 CREATE INDEX IF NOT EXISTS idx_ratings_user ON ratings(user_id);
 CREATE INDEX IF NOT EXISTS idx_ratings_movie ON ratings(movie_id);
 CREATE INDEX IF NOT EXISTS idx_candidates_user ON user_candidates(user_id);
+CREATE INDEX IF NOT EXISTS idx_item_sim_item ON item_similarities(item_id);
+CREATE INDEX IF NOT EXISTS idx_item_sim_sim_item ON item_similarities(similar_item_id);
 CREATE INDEX IF NOT EXISTS idx_recommendations_user_rank ON recommendations(user_id, rank);
