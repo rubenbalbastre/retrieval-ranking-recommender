@@ -14,10 +14,6 @@ def materialize_content_candidates(conn) -> None:
             FROM ratings
             WHERE rating >= 4.0
         ),
-        seen AS (
-            SELECT DISTINCT user_id, movie_id
-            FROM ratings
-        ),
         neighbors AS (
             SELECT
                 l.user_id,
@@ -31,22 +27,14 @@ def materialize_content_candidates(conn) -> None:
                 FROM movie_embeddings AS me
                 WHERE me.movie_id <> l.seed_movie_id
                 ORDER BY seed.embedding <=> me.embedding
-                LIMIT %s
-            ) AS cand
-        ),
-        filtered AS (
-            SELECT n.user_id, n.movie_id, n.score
-            FROM neighbors AS n
-            LEFT JOIN seen AS s
-              ON s.user_id = n.user_id
-             AND s.movie_id = n.movie_id
-            WHERE s.movie_id IS NULL
-        ),
-        aggregated AS (
-            SELECT user_id, movie_id, MAX(score) AS content_score
-            FROM filtered
-            GROUP BY user_id, movie_id
-        )
+                    LIMIT %s
+                ) AS cand
+            ),
+            aggregated AS (
+                SELECT user_id, movie_id, MAX(score) AS content_score
+                FROM neighbors
+                GROUP BY user_id, movie_id
+            )
         SELECT
             user_id,
             movie_id,
@@ -126,10 +114,6 @@ def materialize_collaborative_candidates(conn) -> None:
             FROM ratings
             WHERE rating >= 4.0
         ),
-        seen AS (
-            SELECT DISTINCT user_id, movie_id
-            FROM ratings
-        ),
         seed_neighbors AS (
             SELECT
                 l.user_id,
@@ -139,17 +123,9 @@ def materialize_collaborative_candidates(conn) -> None:
             JOIN item_similarities AS s
               ON s.item_id = l.seed_movie_id
         ),
-        filtered AS (
-            SELECT sn.user_id, sn.movie_id, sn.score
-            FROM seed_neighbors AS sn
-            LEFT JOIN seen AS sv
-              ON sv.user_id = sn.user_id
-             AND sv.movie_id = sn.movie_id
-            WHERE sv.movie_id IS NULL
-        ),
         aggregated AS (
             SELECT user_id, movie_id, MAX(score) AS collaborative_score
-            FROM filtered
+            FROM seed_neighbors
             GROUP BY user_id, movie_id
         )
         SELECT
