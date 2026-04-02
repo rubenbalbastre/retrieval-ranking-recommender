@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import mlflow
+import numpy as np
 import pandas as pd
 import xgboost as xgb
 
@@ -28,6 +29,55 @@ def group_sizes(df: pd.DataFrame) -> list[int]:
     return df.groupby("user_id").size().tolist()
 
 
+def ndcg_at_k(labels: np.ndarray, scores: np.ndarray, k: int = 10) -> float:
+    order = np.argsort(-scores)
+    y = labels[order][:k]
+    gains = (2**y - 1).astype(float)
+    discounts = np.log2(np.arange(2, len(y) + 2))
+    dcg = float((gains / discounts).sum())
+
+    ideal = np.sort(labels)[::-1][:k]
+    ideal_gains = (2**ideal - 1).astype(float)
+    ideal_discounts = np.log2(np.arange(2, len(ideal) + 2))
+    idcg = float((ideal_gains / ideal_discounts).sum())
+    return 0.0 if idcg == 0 else dcg / idcg
+
+
+def print_dataset_diagnostics(ds: pd.DataFrame) -> None:
+    print("Ranking dataset diagnostics:")
+    split_counts = ds["split"].value_counts(dropna=False).to_dict()
+    print(f"- rows per split: {split_counts}")
+
+    for split in ["train", "val", "test"]:
+        part = ds[ds["split"] == split]
+        if part.empty:
+            print(f"- {split}: empty")
+            continue
+        pos_rate = float((part["label"] > 0).mean())
+        g = part.groupby("user_id").size()
+        positives_users = int(part.groupby("user_id")["label"].max().gt(0).sum())
+        print(
+            f"- {split}: rows={len(part)}, pos_rate={pos_rate:.4f}, "
+            f"group_size[min/med/p95]={int(g.min())}/{float(g.median()):.1f}/{float(g.quantile(0.95)):.1f}, "
+            f"users_with_positive={positives_users}/{g.shape[0]}"
+        )
+
+    val = ds[ds["split"] == "val"]
+    if not val.empty:
+        rng = np.random.default_rng(42)
+        ndcgs = []
+        for _, grp in val.groupby("user_id"):
+            y = grp["label"].to_numpy(dtype=np.int32)
+            if y.sum() == 0:
+                continue
+            scores = rng.random(len(grp))
+            ndcgs.append(ndcg_at_k(y, scores, k=10))
+        if ndcgs:
+            print(f"- random baseline ndcg@10 (val): {float(np.mean(ndcgs)):.4f} over {len(ndcgs)} users")
+        else:
+            print("- random baseline ndcg@10 (val): no users with positives")
+
+
 def main() -> None:
     with get_connection() as conn:
         ds = pd.DataFrame(
@@ -40,6 +90,7 @@ def main() -> None:
     ds["label"] = pd.to_numeric(ds["label"], errors="coerce")
     ds["split"] = ds["split"].astype(str)
     ds = ds.dropna(subset=["user_id", "movie_id", "label"]).copy()
+    print_dataset_diagnostics(ds)
 
     train = ds[ds["split"] == "train"].sort_values(["user_id", "movie_id"])
     val = ds[ds["split"] == "val"].sort_values(["user_id", "movie_id"])
