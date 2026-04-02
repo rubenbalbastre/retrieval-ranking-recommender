@@ -18,6 +18,18 @@ def build_time_split(ratings: pd.DataFrame) -> pd.DataFrame:
     return out.drop(columns=["rn", "n", "p"])
 
 
+def rating_to_label(r: float) -> int:
+    if r >= 5.0:
+        return 5
+    if r >= 4.5:
+        return 4
+    if r >= 4.0:
+        return 3
+    if r >= 3.0:
+        return 2
+    return 1
+
+
 def ensure_split_coverage(df: pd.DataFrame) -> pd.DataFrame:
     """
     Ensure ranking dataset has non-empty train and val splits.
@@ -116,7 +128,7 @@ def main() -> None:
     joined = joined.merge(movies, on="movie_id", how="left")
 
     label_df = ratings[["user_id", "movie_id", "rating", "split"]].copy()
-    label_df["label"] = (label_df["rating"] >= 4.0).astype(int)
+    label_df["label"] = label_df["rating"].map(rating_to_label).astype(int)
     label_df = label_df[["user_id", "movie_id", "split", "label"]]
 
     joined = joined.merge(label_df, on=["user_id", "movie_id"], how="left")
