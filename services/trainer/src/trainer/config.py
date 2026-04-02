@@ -17,7 +17,7 @@ class Settings:
     processed_dir: Path = Path(os.getenv("PROCESSED_DIR", "data/processed"))
     models_dir: Path = Path(os.getenv("MODELS_DIR", "artifacts/models"))
 
-    embedding_dim: int = int(os.getenv("EMBEDDING_DIM", "256"))
+    embedding_model: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
     content_top_k: int = int(os.getenv("CONTENT_TOP_K", "50"))
     collaborative_top_k: int = int(os.getenv("COLLABORATIVE_TOP_K", "50"))
     final_top_k: int = int(os.getenv("FINAL_TOP_K", "10"))
