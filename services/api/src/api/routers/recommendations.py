@@ -13,7 +13,7 @@ from api.schemas import Recommendation
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
 
 
-def read_precomputed(user_id: int, limit: int) -> list[Recommendation]:
+def read_precomputed(user_id: int, limit: int) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
@@ -26,7 +26,7 @@ def read_precomputed(user_id: int, limit: int) -> list[Recommendation]:
             """,
             (user_id, settings.precomputed_max_age_seconds, limit),
         ).fetchall()
-    return [Recommendation(**row) for row in rows]
+    return [dict(row) for row in rows]
 
 
 def read_candidate_features(user_id: int, limit: int) -> list[dict]:
@@ -50,12 +50,12 @@ def read_candidate_features(user_id: int, limit: int) -> list[dict]:
 
 
 @router.get("/{user_id}", response_model=list[Recommendation])
-def get_recommendations(user_id: int, limit: int = 10) -> list[Recommendation]:
+def get_recommendations(user_id: int, limit: int = 10) -> list[dict]:
     cached = get_cached_recommendations(user_id, limit)
     if cached is not None:
-        return [Recommendation(**r) for r in cached]
+        return [dict(r) for r in cached]
 
-    result: list[Recommendation]
+    result: list[dict]
     precomputed = read_precomputed(user_id, limit)
     if precomputed:
         result = precomputed
@@ -72,7 +72,7 @@ def get_recommendations(user_id: int, limit: int = 10) -> list[Recommendation]:
                 reverse=True,
             )[:limit]
             result = [
-                Recommendation(movie_id=row["movie_id"], score=row["score"], rank=i + 1)
+                {"movie_id": row["movie_id"], "score": row["score"], "rank": i + 1}
                 for i, row in enumerate(scored)
             ]
         else:
@@ -80,5 +80,5 @@ def get_recommendations(user_id: int, limit: int = 10) -> list[Recommendation]:
     else:
         result = []
 
-    set_cached_recommendations(user_id, limit, [r.model_dump() for r in result])
+    set_cached_recommendations(user_id, limit, result)
     return result
