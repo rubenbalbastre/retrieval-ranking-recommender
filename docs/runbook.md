@@ -17,4 +17,9 @@
 
 ## Re-run training
 
-- `docker compose run --rm trainer python -m trainer.pipelines.run_pipeline`
+- `make train`
+
+## Notes
+
+- Training and recommendation generation run through the trainer service and stop when trainer exits.
+- A warning about Git metadata in MLflow logs is non-blocking in this setup.

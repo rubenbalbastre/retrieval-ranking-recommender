@@ -1,145 +1,195 @@
 from __future__ import annotations
 
-import numpy as np
-import pandas as pd
-
 from trainer.config import settings
 from trainer.db import get_connection
 
 
-def parse_embedding(value: object) -> np.ndarray:
-    if isinstance(value, str):
-        cleaned = value.strip().strip("[]")
-        if not cleaned:
-            return np.array([], dtype=np.float32)
-        return np.fromstring(cleaned, sep=",", dtype=np.float32)
-    return np.array(value, dtype=np.float32)
-
-
-def build_content_candidates(ratings: pd.DataFrame, embeddings: pd.DataFrame) -> pd.DataFrame:
-    emb_map = {int(row.movie_id): parse_embedding(row.embedding) for row in embeddings.itertuples(index=False)}
-    all_movie_ids = list(emb_map.keys())
-    all_matrix = np.vstack([emb_map[mid] for mid in all_movie_ids])
-
-    rows = []
-    liked = ratings[ratings["rating"] >= 4.0]
-    for user_id, grp in liked.groupby("user_id"):
-        seen = set(grp["movie_id"].tolist())
-        source_movies = grp["movie_id"].tolist()
-        score_acc: dict[int, float] = {}
-
-        for source_id in source_movies:
-            if source_id not in emb_map:
-                continue
-            sims = all_matrix @ emb_map[source_id]
-            top_idx = np.argpartition(-sims, min(settings.content_top_k, len(sims) - 1))[: settings.content_top_k]
-            for idx in top_idx:
-                movie_id = all_movie_ids[idx]
-                if movie_id in seen:
-                    continue
-                score_acc[movie_id] = max(score_acc.get(movie_id, -1.0), float(sims[idx]))
-
-        ranked = sorted(score_acc.items(), key=lambda x: x[1], reverse=True)[: settings.content_top_k]
-        for rank, (movie_id, score) in enumerate(ranked, start=1):
-            rows.append(
-                {
-                    "user_id": user_id,
-                    "movie_id": movie_id,
-                    "retrieved_by_content": True,
-                    "content_score": score,
-                    "content_rank": rank,
-                }
+def materialize_content_candidates(conn) -> None:
+    conn.execute("DROP TABLE IF EXISTS tmp_content_candidates")
+    conn.execute(
+        """
+        CREATE TEMP TABLE tmp_content_candidates AS
+        WITH liked AS (
+            SELECT DISTINCT user_id, movie_id AS seed_movie_id
+            FROM ratings
+            WHERE rating >= 4.0
+        ),
+        neighbors AS (
+            SELECT
+                l.user_id,
+                cand.movie_id,
+                1 - (cand.embedding <=> seed.embedding) AS score
+            FROM liked AS l
+            JOIN movie_embeddings AS seed
+              ON seed.movie_id = l.seed_movie_id
+            CROSS JOIN LATERAL (
+                SELECT me.movie_id, me.embedding
+                FROM movie_embeddings AS me
+                WHERE me.movie_id <> l.seed_movie_id
+                ORDER BY seed.embedding <=> me.embedding
+                    LIMIT %s
+                ) AS cand
+            ),
+            aggregated AS (
+                SELECT user_id, movie_id, MAX(score) AS content_score
+                FROM neighbors
+                GROUP BY user_id, movie_id
             )
+        SELECT
+            user_id,
+            movie_id,
+            content_score,
+            ROW_NUMBER() OVER (
+                PARTITION BY user_id
+                ORDER BY content_score DESC, movie_id
+            ) AS content_rank
+        FROM aggregated
+        """,
+        (settings.content_top_k,),
+    )
 
-    return pd.DataFrame(rows)
 
+def materialize_collaborative_candidates(conn) -> None:
+    min_common_users = 2
+    max_neighbors_per_item = 200
 
-def build_collaborative_candidates(ratings: pd.DataFrame) -> pd.DataFrame:
-    pivot = ratings.pivot_table(index="user_id", columns="movie_id", values="rating", fill_value=0.0)
-    item_mat = pivot.T.values
-    norms = np.linalg.norm(item_mat, axis=1, keepdims=True) + 1e-9
-    item_norm = item_mat / norms
-    sim = item_norm @ item_norm.T
+    conn.execute("TRUNCATE TABLE item_similarities")
+    conn.execute(
+        """
+        WITH pairs AS (
+            SELECT
+                r1.movie_id AS item_id,
+                r2.movie_id AS similar_item_id,
+                COUNT(*) AS common_users,
+                SUM(r1.rating * r2.rating) AS dot,
+                SQRT(SUM(r1.rating * r1.rating)) AS norm_i,
+                SQRT(SUM(r2.rating * r2.rating)) AS norm_j
+            FROM ratings AS r1
+            JOIN ratings AS r2
+              ON r1.user_id = r2.user_id
+             AND r1.movie_id <> r2.movie_id
+            WHERE r1.rating >= 4.0
+              AND r2.rating >= 4.0
+            GROUP BY r1.movie_id, r2.movie_id
+            HAVING COUNT(*) >= %s
+        ),
+        scored AS (
+            SELECT
+                item_id,
+                similar_item_id,
+                CASE
+                    WHEN norm_i > 0 AND norm_j > 0 THEN dot / (norm_i * norm_j)
+                    ELSE 0.0
+                END AS similarity
+            FROM pairs
+        ),
+        ranked AS (
+            SELECT
+                item_id,
+                similar_item_id,
+                similarity,
+                ROW_NUMBER() OVER (
+                    PARTITION BY item_id
+                    ORDER BY similarity DESC, similar_item_id
+                ) AS rnk
+            FROM scored
+        )
+        INSERT INTO item_similarities (item_id, similar_item_id, similarity)
+        SELECT
+            item_id,
+            similar_item_id,
+            similarity
+        FROM ranked
+        WHERE rnk <= %s
+        """,
+        (min_common_users, max_neighbors_per_item),
+    )
 
-    movie_ids = pivot.columns.to_numpy()
-    movie_idx = {m: i for i, m in enumerate(movie_ids)}
-
-    rows = []
-    liked = ratings[ratings["rating"] >= 4.0]
-    for user_id, grp in liked.groupby("user_id"):
-        seen = set(grp["movie_id"].tolist())
-        score_acc: dict[int, float] = {}
-
-        for source_id in grp["movie_id"].tolist():
-            if source_id not in movie_idx:
-                continue
-            i = movie_idx[source_id]
-            sims = sim[i]
-            top_idx = np.argpartition(-sims, min(settings.collaborative_top_k, len(sims) - 1))[: settings.collaborative_top_k]
-            for j in top_idx:
-                candidate = int(movie_ids[j])
-                if candidate in seen:
-                    continue
-                score_acc[candidate] = max(score_acc.get(candidate, -1.0), float(sims[j]))
-
-        ranked = sorted(score_acc.items(), key=lambda x: x[1], reverse=True)[: settings.collaborative_top_k]
-        for rank, (movie_id, score) in enumerate(ranked, start=1):
-            rows.append(
-                {
-                    "user_id": user_id,
-                    "movie_id": movie_id,
-                    "retrieved_by_collaborative": True,
-                    "collaborative_score": score,
-                    "collaborative_rank": rank,
-                }
-            )
-
-    return pd.DataFrame(rows)
+    conn.execute("DROP TABLE IF EXISTS tmp_collab_candidates")
+    conn.execute(
+        """
+        CREATE TEMP TABLE tmp_collab_candidates AS
+        WITH liked AS (
+            SELECT DISTINCT user_id, movie_id AS seed_movie_id
+            FROM ratings
+            WHERE rating >= 4.0
+        ),
+        seed_neighbors AS (
+            SELECT
+                l.user_id,
+                s.similar_item_id AS movie_id,
+                s.similarity AS score
+            FROM liked AS l
+            JOIN item_similarities AS s
+              ON s.item_id = l.seed_movie_id
+        ),
+        aggregated AS (
+            SELECT user_id, movie_id, MAX(score) AS collaborative_score
+            FROM seed_neighbors
+            GROUP BY user_id, movie_id
+        )
+        SELECT
+            user_id,
+            movie_id,
+            collaborative_score,
+            ROW_NUMBER() OVER (
+                PARTITION BY user_id
+                ORDER BY collaborative_score DESC, movie_id
+            ) AS collaborative_rank
+        FROM aggregated
+        """
+    )
 
 
 def main() -> None:
     with get_connection() as conn:
-        ratings = pd.DataFrame(conn.execute("SELECT user_id, movie_id, rating FROM ratings").fetchall())
-        embeddings = pd.DataFrame(conn.execute("SELECT movie_id, embedding FROM movie_embeddings").fetchall())
+        materialize_content_candidates(conn)
+        materialize_collaborative_candidates(conn)
 
-    content_df = build_content_candidates(ratings, embeddings)
-    collab_df = build_collaborative_candidates(ratings)
-
-    merged = content_df.merge(collab_df, on=["user_id", "movie_id"], how="outer")
-    merged["retrieved_by_content"] = merged["retrieved_by_content"].eq(True)
-    merged["retrieved_by_collaborative"] = merged["retrieved_by_collaborative"].eq(True)
-    merged["number_of_sources"] = (
-        merged["retrieved_by_content"].astype(int) + merged["retrieved_by_collaborative"].astype(int)
-    )
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE user_candidates")
-            cur.executemany(
-                """
-                INSERT INTO user_candidates (
-                    user_id, movie_id, retrieved_by_content, retrieved_by_collaborative,
-                    content_score, content_rank, collaborative_score, collaborative_rank, number_of_sources
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                [
-                    (
-                        int(r.user_id),
-                        int(r.movie_id),
-                        bool(r.retrieved_by_content),
-                        bool(r.retrieved_by_collaborative),
-                        None if pd.isna(r.content_score) else float(r.content_score),
-                        None if pd.isna(r.content_rank) else int(r.content_rank),
-                        None if pd.isna(r.collaborative_score) else float(r.collaborative_score),
-                        None if pd.isna(r.collaborative_rank) else int(r.collaborative_rank),
-                        int(r.number_of_sources),
-                    )
-                    for r in merged.itertuples(index=False)
-                ],
+        conn.execute("TRUNCATE TABLE user_candidates")
+        conn.execute(
+            """
+            INSERT INTO user_candidates (
+                user_id,
+                movie_id,
+                retrieved_by_content,
+                retrieved_by_collaborative,
+                content_score,
+                content_rank,
+                collaborative_score,
+                collaborative_rank,
+                number_of_sources
             )
+            SELECT
+                COALESCE(c.user_id, k.user_id) AS user_id,
+                COALESCE(c.movie_id, k.movie_id) AS movie_id,
+                (c.user_id IS NOT NULL) AS retrieved_by_content,
+                (k.user_id IS NOT NULL) AS retrieved_by_collaborative,
+                c.content_score,
+                c.content_rank,
+                k.collaborative_score,
+                k.collaborative_rank,
+                ((c.user_id IS NOT NULL)::int + (k.user_id IS NOT NULL)::int) AS number_of_sources
+            FROM (
+                SELECT *
+                FROM tmp_content_candidates
+                WHERE content_rank <= %s
+            ) AS c
+            FULL OUTER JOIN (
+                SELECT *
+                FROM tmp_collab_candidates
+                WHERE collaborative_rank <= %s
+            ) AS k
+              ON c.user_id = k.user_id
+             AND c.movie_id = k.movie_id
+            """,
+            (settings.content_top_k, settings.collaborative_top_k),
+        )
+
+        count = conn.execute("SELECT COUNT(*) AS n FROM user_candidates").fetchone()["n"]
         conn.commit()
 
-    print(f"Generated {len(merged)} unique candidates.")
+    print(f"Generated {count} unique candidates.")
 
 
 if __name__ == "__main__":

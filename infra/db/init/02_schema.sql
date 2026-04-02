@@ -3,6 +3,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 DROP TABLE IF EXISTS recommendations;
 DROP TABLE IF EXISTS ranking_dataset;
 DROP TABLE IF EXISTS user_candidates;
+DROP TABLE IF EXISTS item_similarities;
 DROP TABLE IF EXISTS movie_embeddings;
 DROP TABLE IF EXISTS tags;
 DROP TABLE IF EXISTS ratings;
@@ -34,6 +35,8 @@ CREATE TABLE movie_embeddings (
     movie_id BIGINT PRIMARY KEY REFERENCES movies(movie_id),
     embedding vector(256)
 );
+CREATE INDEX IF NOT EXISTS idx_movie_embeddings_embedding_ivfflat
+ON movie_embeddings USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 
 CREATE TABLE user_candidates (
     user_id BIGINT NOT NULL,
@@ -46,6 +49,13 @@ CREATE TABLE user_candidates (
     collaborative_rank INT,
     number_of_sources INT NOT NULL DEFAULT 1,
     PRIMARY KEY (user_id, movie_id)
+);
+
+CREATE TABLE item_similarities (
+    item_id BIGINT NOT NULL,
+    similar_item_id BIGINT NOT NULL,
+    similarity DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (item_id, similar_item_id)
 );
 
 CREATE TABLE ranking_dataset (
@@ -69,4 +79,6 @@ CREATE TABLE recommendations (
 CREATE INDEX IF NOT EXISTS idx_ratings_user ON ratings(user_id);
 CREATE INDEX IF NOT EXISTS idx_ratings_movie ON ratings(movie_id);
 CREATE INDEX IF NOT EXISTS idx_candidates_user ON user_candidates(user_id);
+CREATE INDEX IF NOT EXISTS idx_item_sim_item ON item_similarities(item_id);
+CREATE INDEX IF NOT EXISTS idx_item_sim_sim_item ON item_similarities(similar_item_id);
 CREATE INDEX IF NOT EXISTS idx_recommendations_user_rank ON recommendations(user_id, rank);
