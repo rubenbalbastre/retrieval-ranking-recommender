@@ -7,76 +7,81 @@ from trainer.config import settings
 from trainer.db import get_connection
 
 
-def parse_embedding(value: object) -> np.ndarray:
-    if isinstance(value, str):
-        cleaned = value.strip().strip("[]")
-        if not cleaned:
-            return np.array([], dtype=np.float32)
-        return np.fromstring(cleaned, sep=",", dtype=np.float32)
-    return np.array(value, dtype=np.float32)
-
-
-def build_content_candidates(ratings: pd.DataFrame, embeddings: pd.DataFrame) -> pd.DataFrame:
+def build_content_candidates() -> pd.DataFrame:
     """
-    Generate content-based candidates per user using embedding similarity.
+    Generate content-based candidates with a set-based SQL pipeline in Postgres.
 
-    Expected inputs:
-    - ratings columns: user_id, movie_id, rating
-    - embeddings columns: movie_id, embedding
-
-    Logic:
-    1. Build a dense embedding matrix for all movies.
-    2. For each user, take positively-rated movies (rating >= 4) as retrieval seeds.
-    3. Compute similarities between all movies and that user's seed movies in one matrix op.
-    4. Aggregate per-movie similarity with max() across seeds.
-    5. Exclude already seen items for that user and keep top-K by similarity.
-
-    Notes on terminology:
-    - liked_movie_ids: seed set used to retrieve neighbors (positive feedback).
-    - seen: items excluded from recommendation output.
-      In the current implementation, seen matches liked items. In stricter setups,
-      seen can be all historically interacted items (any rating), while seeds remain
-      only positive items.
+    SQL workflow:
+    1. Build per-user positive seeds (rating >= 4.0).
+    2. For each seed, retrieve top-K nearest neighbors via pgvector LATERAL query.
+    3. Exclude seen items (any prior user rating).
+    4. Aggregate by max(score) for each (user, candidate).
+    5. Rank per-user and keep top-K.
     """
-    emb_map = {int(row.movie_id): parse_embedding(row.embedding) for row in embeddings.itertuples(index=False)}
-    all_movie_ids = list(emb_map.keys())
-    all_matrix = np.vstack([emb_map[mid] for mid in all_movie_ids]) # [n_movies, dim]
-    movie_index = {movie_id: idx for idx, movie_id in enumerate(all_movie_ids)}
-
-    rows = []
-    liked = ratings[ratings["rating"] >= 4.0]
-    for user_id, grp in liked.groupby("user_id"):
-        seen = set(grp["movie_id"].tolist())
-        liked_movie_ids = [int(mid) for mid in grp["movie_id"].tolist() if int(mid) in movie_index]
-        if not liked_movie_ids:
-            continue
-
-        source_idx = [movie_index[mid] for mid in liked_movie_ids]
-        source_matrix = all_matrix[source_idx]  # [n_source, dim]
-        sims = all_matrix @ source_matrix.T  # [n_movies, n_source]
-        agg_scores = sims.max(axis=1)  # max similarity against liked movies
-
-        if seen:
-            seen_idx = np.array([movie_index[mid] for mid in seen if mid in movie_index], dtype=np.int64)
-            agg_scores[seen_idx] = -np.inf
-
-        k = min(settings.content_top_k, len(agg_scores))
-        if k <= 0:
-            continue
-        top_idx = np.argpartition(-agg_scores, k - 1)[:k]
-        top_idx = top_idx[np.argsort(-agg_scores[top_idx])]
-        ranked = [(all_movie_ids[int(idx)], float(agg_scores[int(idx)])) for idx in top_idx]
-
-        for rank, (movie_id, score) in enumerate(ranked, start=1):
-            rows.append(
-                {
-                    "user_id": user_id,
-                    "movie_id": movie_id,
-                    "retrieved_by_content": True,
-                    "content_score": score,
-                    "content_rank": rank,
-                }
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            WITH liked AS (
+                SELECT DISTINCT user_id, movie_id AS seed_movie_id
+                FROM ratings
+                WHERE rating >= 4.0
+            ),
+            seen AS (
+                SELECT DISTINCT user_id, movie_id
+                FROM ratings
+            ),
+            neighbors AS (
+                SELECT
+                    l.user_id,
+                    cand.movie_id,
+                    1 - (cand.embedding <=> seed.embedding) AS score
+                FROM liked AS l
+                JOIN movie_embeddings AS seed
+                  ON seed.movie_id = l.seed_movie_id
+                CROSS JOIN LATERAL (
+                    SELECT me.movie_id, me.embedding
+                    FROM movie_embeddings AS me
+                    WHERE me.movie_id <> l.seed_movie_id
+                    ORDER BY seed.embedding <=> me.embedding
+                    LIMIT %s
+                ) AS cand
+            ),
+            filtered AS (
+                SELECT n.user_id, n.movie_id, n.score
+                FROM neighbors AS n
+                LEFT JOIN seen AS s
+                  ON s.user_id = n.user_id
+                 AND s.movie_id = n.movie_id
+                WHERE s.movie_id IS NULL
+            ),
+            aggregated AS (
+                SELECT user_id, movie_id, MAX(score) AS content_score
+                FROM filtered
+                GROUP BY user_id, movie_id
+            ),
+            ranked AS (
+                SELECT
+                    user_id,
+                    movie_id,
+                    content_score,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY user_id
+                        ORDER BY content_score DESC, movie_id
+                    ) AS content_rank
+                FROM aggregated
             )
+            SELECT
+                user_id,
+                movie_id,
+                TRUE AS retrieved_by_content,
+                content_score,
+                content_rank
+            FROM ranked
+            WHERE content_rank <= %s
+            ORDER BY user_id, content_rank
+            """,
+            (settings.content_top_k, settings.content_top_k),
+        ).fetchall()
 
     return pd.DataFrame(rows)
 
@@ -127,9 +132,8 @@ def build_collaborative_candidates(ratings: pd.DataFrame) -> pd.DataFrame:
 def main() -> None:
     with get_connection() as conn:
         ratings = pd.DataFrame(conn.execute("SELECT user_id, movie_id, rating FROM ratings").fetchall())
-        embeddings = pd.DataFrame(conn.execute("SELECT movie_id, embedding FROM movie_embeddings").fetchall())
 
-    content_df = build_content_candidates(ratings, embeddings)
+    content_df = build_content_candidates()
     collab_df = build_collaborative_candidates(ratings)
 
     merged = content_df.merge(collab_df, on=["user_id", "movie_id"], how="outer")

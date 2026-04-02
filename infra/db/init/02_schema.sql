@@ -34,6 +34,8 @@ CREATE TABLE movie_embeddings (
     movie_id BIGINT PRIMARY KEY REFERENCES movies(movie_id),
     embedding vector(256)
 );
+CREATE INDEX IF NOT EXISTS idx_movie_embeddings_embedding_ivfflat
+ON movie_embeddings USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 
 CREATE TABLE user_candidates (
     user_id BIGINT NOT NULL,
