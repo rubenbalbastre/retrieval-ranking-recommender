@@ -17,29 +17,56 @@ def parse_embedding(value: object) -> np.ndarray:
 
 
 def build_content_candidates(ratings: pd.DataFrame, embeddings: pd.DataFrame) -> pd.DataFrame:
+    """
+    Generate content-based candidates per user using embedding similarity.
+
+    Expected inputs:
+    - ratings columns: user_id, movie_id, rating
+    - embeddings columns: movie_id, embedding
+
+    Logic:
+    1. Build a dense embedding matrix for all movies.
+    2. For each user, take positively-rated movies (rating >= 4) as retrieval seeds.
+    3. Compute similarities between all movies and that user's seed movies in one matrix op.
+    4. Aggregate per-movie similarity with max() across seeds.
+    5. Exclude already seen items for that user and keep top-K by similarity.
+
+    Notes on terminology:
+    - liked_movie_ids: seed set used to retrieve neighbors (positive feedback).
+    - seen: items excluded from recommendation output.
+      In the current implementation, seen matches liked items. In stricter setups,
+      seen can be all historically interacted items (any rating), while seeds remain
+      only positive items.
+    """
     emb_map = {int(row.movie_id): parse_embedding(row.embedding) for row in embeddings.itertuples(index=False)}
     all_movie_ids = list(emb_map.keys())
-    all_matrix = np.vstack([emb_map[mid] for mid in all_movie_ids])
+    all_matrix = np.vstack([emb_map[mid] for mid in all_movie_ids]) # [n_movies, dim]
+    movie_index = {movie_id: idx for idx, movie_id in enumerate(all_movie_ids)}
 
     rows = []
     liked = ratings[ratings["rating"] >= 4.0]
     for user_id, grp in liked.groupby("user_id"):
         seen = set(grp["movie_id"].tolist())
-        source_movies = grp["movie_id"].tolist()
-        score_acc: dict[int, float] = {}
+        liked_movie_ids = [int(mid) for mid in grp["movie_id"].tolist() if int(mid) in movie_index]
+        if not liked_movie_ids:
+            continue
 
-        for source_id in source_movies:
-            if source_id not in emb_map:
-                continue
-            sims = all_matrix @ emb_map[source_id]
-            top_idx = np.argpartition(-sims, min(settings.content_top_k, len(sims) - 1))[: settings.content_top_k]
-            for idx in top_idx:
-                movie_id = all_movie_ids[idx]
-                if movie_id in seen:
-                    continue
-                score_acc[movie_id] = max(score_acc.get(movie_id, -1.0), float(sims[idx]))
+        source_idx = [movie_index[mid] for mid in liked_movie_ids]
+        source_matrix = all_matrix[source_idx]  # [n_source, dim]
+        sims = all_matrix @ source_matrix.T  # [n_movies, n_source]
+        agg_scores = sims.max(axis=1)  # max similarity against liked movies
 
-        ranked = sorted(score_acc.items(), key=lambda x: x[1], reverse=True)[: settings.content_top_k]
+        if seen:
+            seen_idx = np.array([movie_index[mid] for mid in seen if mid in movie_index], dtype=np.int64)
+            agg_scores[seen_idx] = -np.inf
+
+        k = min(settings.content_top_k, len(agg_scores))
+        if k <= 0:
+            continue
+        top_idx = np.argpartition(-agg_scores, k - 1)[:k]
+        top_idx = top_idx[np.argsort(-agg_scores[top_idx])]
+        ranked = [(all_movie_ids[int(idx)], float(agg_scores[int(idx)])) for idx in top_idx]
+
         for rank, (movie_id, score) in enumerate(ranked, start=1):
             rows.append(
                 {
