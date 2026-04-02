@@ -34,7 +34,8 @@ openrecommender/
 - `db`: PostgreSQL + pgvector
 - `mlflow`: experiment tracking UI/server
 - `trainer`: batch pipeline to ingest, build features, train, and materialize recommendations
-- `api`: serves `GET /recommendations/{user_id}` from precomputed results
+- `api`: serves `GET /recommendations/{user_id}` with cache-aside online scoring + DB fallback
+- `redis`: low-latency cache for recommendation responses
 
 ## Recent pipeline design updates
 

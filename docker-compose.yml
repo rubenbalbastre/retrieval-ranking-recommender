@@ -61,15 +61,24 @@ services:
     container_name: openrecommender-api
     depends_on:
       - db
+      - redis
     env_file:
       - .env
     environment:
       DB_HOST: db
+      REDIS_HOST: redis
+      MODELS_DIR: artifacts/models
     ports:
       - "8000:8000"
     volumes:
       - ./:/app
     working_dir: /app
+
+  redis:
+    image: redis:7-alpine
+    container_name: openrecommender-redis
+    ports:
+      - "6379:6379"
 
 volumes:
   postgres_data:
